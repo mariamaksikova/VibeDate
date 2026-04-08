@@ -1,0 +1,14 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vibedate
+      POSTGRES_PASSWORD: vibedate
+      POSTGRES_DB: vibedate
+    ports:
+      - "5432:5432"
+    volumes:
+      - vibedate_pgdata:/var/lib/postgresql/data
+
+volumes:
+  vibedate_pgdata:

@@ -27,6 +27,8 @@ services:
       DB_NAME: store_db
       DB_USER: store_user
       DB_PASSWORD: store_pass
+    ports:
+      - "8000:8000"
 
 volumes:
   postgres_data:

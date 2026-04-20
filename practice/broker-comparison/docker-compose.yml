@@ -1,0 +1,26 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: broker_cmp_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  redis:
+    image: redis:7
+    container_name: broker_cmp_redis
+    ports:
+      - "6379:6379"
+
+  benchmark:
+    build: .
+    container_name: broker_cmp_runner
+    depends_on:
+      - rabbitmq
+      - redis
+    environment:
+      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    volumes:
+      - ./results:/app/results

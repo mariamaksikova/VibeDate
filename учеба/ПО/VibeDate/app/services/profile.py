@@ -6,14 +6,15 @@ from app.services.rating import calc_behavior_rating, calc_combined_rating, calc
 
 
 def _profile_completeness(
+    display_name: str | None,
     age: int | None,
     gender: str | None,
     city: str | None,
     interests: str | None,
     bio: str | None,
 ) -> int:
-    filled = sum([bool(age), bool(gender), bool(city), bool(interests), bool(bio)])
-    return int((filled / 5) * 100)
+    filled = sum([bool(display_name), bool(age), bool(gender), bool(city), bool(interests), bool(bio)])
+    return int((filled / 6) * 100)
 
 
 async def refresh_profile_rating(pool: asyncpg.Pool, profile_id: int) -> None:
@@ -26,6 +27,7 @@ async def refresh_profile_rating(pool: asyncpg.Pool, profile_id: int) -> None:
                 p.city,
                 p.interests,
                 p.bio,
+                p.display_name,
                 p.looking_for,
                 p.photo_count,
                 COALESCE(r.likes_received, 0) AS likes_received,
@@ -42,6 +44,7 @@ async def refresh_profile_rating(pool: asyncpg.Pool, profile_id: int) -> None:
             return
 
         completeness = _profile_completeness(
+            display_name=row["display_name"],
             age=row["age"],
             gender=row["gender"],
             city=row["city"],

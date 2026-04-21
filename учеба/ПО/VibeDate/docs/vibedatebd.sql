@@ -10,6 +10,7 @@ CREATE TABLE users (
 CREATE TABLE profiles (
     id                  SERIAL PRIMARY KEY,
     user_id             INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    display_name        VARCHAR(80),
     age                 INTEGER,
     gender              CHAR(1),               
     city                VARCHAR(100),
@@ -17,7 +18,7 @@ CREATE TABLE profiles (
     bio                 TEXT,
     min_age             INTEGER,
     max_age             INTEGER,
-    looking_for         CHAR(1),             
+    looking_for         CHAR(1), -- m/f/a (a = both)            
     photo_count         INTEGER DEFAULT 0,
     completeness_score  INTEGER DEFAULT 0,   
     primary_rating      INTEGER DEFAULT 1000, 

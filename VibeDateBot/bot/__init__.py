@@ -1,1 +1,0 @@
-# VibeDate Telegram bot package

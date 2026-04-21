@@ -1,6 +1,6 @@
 CREATE TABLE users (
     id            SERIAL PRIMARY KEY,
-    tg_id         INTEGER UNIQUE NOT NULL,
+    tg_id         BIGINT UNIQUE NOT NULL,
     username      VARCHAR(100),
     referral_code VARCHAR(20) UNIQUE,         
     referred_by   INTEGER,                     
@@ -9,7 +9,7 @@ CREATE TABLE users (
 
 CREATE TABLE profiles (
     id                  SERIAL PRIMARY KEY,
-    user_id             INTEGER UNIQUE NOT NULL REFERENCES users(tg_id) ON DELETE CASCADE,
+    user_id             INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     age                 INTEGER,
     gender              CHAR(1),               
     city                VARCHAR(100),

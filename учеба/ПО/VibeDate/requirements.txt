@@ -1,0 +1,11 @@
+aiogram==3.13.0
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+sqlalchemy==2.0.35
+alembic==1.13.2
+asyncpg==0.29.0
+redis==5.1.0
+celery==5.4.0
+python-dotenv==1.0.1
+structlog==24.4.0
+Pillow==10.4.0

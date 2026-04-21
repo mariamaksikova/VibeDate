@@ -4,10 +4,10 @@ import html
 import logging
 
 import asyncpg
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.types import CallbackQuery, Message
 
 from app.db import (
@@ -117,6 +117,13 @@ def _profile_text(profile: dict[str, object]) -> str:
         f"Первичный рейтинг: {profile['primary_rating']}\n"
         f"Заполненность анкеты: {profile['completeness_score']}%"
     )
+
+
+def _telegram_file_id_from_photo_key(s3_key: object) -> str | None:
+    text = str(s3_key or "")
+    if text.startswith("tg:") and len(text) > 3:
+        return text[3:]
+    return None
 
 
 def _profile_ready(profile: dict[str, object]) -> bool:
@@ -246,9 +253,24 @@ async def cmd_my_profile(message: Message, db_pool: asyncpg.Pool) -> None:
         await message.answer("Не удалось загрузить анкету. Попробуй /start.")
         return
     await message.answer(_profile_text(profile))
+    photos = await get_profile_photos_by_tg_id(db_pool, message.from_user.id)
+    if photos:
+        await message.answer(f"Фотографии в анкете: {len(photos)}")
+        for idx, photo in enumerate(photos[:3], start=1):
+            file_id = _telegram_file_id_from_photo_key(photo.get("s3_key"))
+            if file_id is None:
+                continue
+            await message.answer_photo(
+                file_id,
+                caption=f"Фото {idx}{' (главное)' if photo.get('is_main') else ''}",
+            )
+        if len(photos) > 3:
+            await message.answer("Показала первые 3 фото. Остальные тоже сохранены.")
+    else:
+        await message.answer("Фото пока нет. Добавь их кнопкой 'Добавить фото'.")
     await message.answer(
-        "Обновить данные можно кнопкой 'Редактировать анкету'. "
-        "Фото добавляются кнопкой 'Добавить фото'."
+        "Хочешь обновиться? Жми 'Редактировать анкету'. "
+        "Новые фотки - через 'Добавить фото'."
     )
 
 
@@ -262,9 +284,20 @@ async def cmd_edit_profile(message: Message, db_pool: asyncpg.Pool) -> None:
         await message.answer("Не получилось открыть редактор анкеты. Попробуй /start.")
         return
     await message.answer(
-        "Что меняем в анкете? Выбери поле ниже:",
+        "Тюнингуем профиль! Что хочешь поменять?",
         reply_markup=edit_profile_keyboard(),
     )
+
+
+@router.message(StateFilter("*"), Command("cancel"))
+@router.message(StateFilter("*"), F.text == "Отмена заполнения")
+async def cancel_any_wizard(message: Message, state: FSMContext) -> None:
+    current = await state.get_state()
+    if not current:
+        await message.answer("Сейчас ничего не заполняется 🙂")
+        return
+    await state.clear()
+    await message.answer("Окей, остановили заполнение. Можешь вернуться в меню.")
 
 
 @router.callback_query(lambda c: c.data is not None and c.data.startswith("edit:"))
@@ -372,7 +405,9 @@ async def edit_profile_value(message: Message, state: FSMContext, db_pool: async
 async def cmd_add_photo(message: Message, state: FSMContext) -> None:
     await state.set_state(PhotoUpload.waiting)
     await message.answer(
-        "Пришли фото одним сообщением. Можно хранить до 5 фото, первое будет главным."
+        "Отправь фото одним сообщением.\n"
+        "Можно хранить до 5 фото, а первое станет главным.\n"
+        "Если передумала - /cancel"
     )
 
 
@@ -382,9 +417,9 @@ async def cmd_my_photos(message: Message, db_pool: asyncpg.Pool) -> None:
         return
     photos = await get_profile_photos_by_tg_id(db_pool, message.from_user.id)
     if not photos:
-        await message.answer("Фотографий пока нет. Добавь через 'Добавить фото' или /add_photo.")
+        await message.answer("Фотографий пока нет. Добавь через 'Добавить фото' или /add_photo ✨")
         return
-    await message.answer(f"У тебя {len(photos)} фото в анкете.")
+    await message.answer(f"У тебя {len(photos)} фото в анкете. Красота!")
 
 
 @router.message(PhotoUpload.waiting, lambda m: bool(m.photo))
@@ -403,12 +438,12 @@ async def upload_photo(message: Message, state: FSMContext, db_pool: asyncpg.Poo
         return
     await refresh_profile_rating(db_pool, int(result["profile_id"]))
     await state.clear()
-    await message.answer(f"Фото сохранено! Теперь в анкете {result['photo_count']} фото.")
+    await message.answer(f"Готово! Фото на месте. Теперь в анкете {result['photo_count']} фото.")
 
 
 @router.message(PhotoUpload.waiting)
 async def upload_photo_fallback(message: Message) -> None:
-    await message.answer("Жду именно фото. Отправь картинку, пожалуйста.")
+    await message.answer("Жду именно фото 📷. Отправь картинку одним сообщением или /cancel.")
 
 
 @router.message(Command("set_name"))
@@ -625,7 +660,11 @@ async def cb_reaction(callback: CallbackQuery, db_pool: asyncpg.Pool, bot: Bot) 
 @router.message(lambda m: (m.text or "").strip() == "Заполнить анкету")
 async def cmd_profile_wizard(message: Message, state: FSMContext) -> None:
     await state.set_state(ProfileWizard.display_name)
-    await message.answer("Шаг 1/9. Введи имя для анкеты (2-40 символов):")
+    await message.answer(
+        "Поехали собирать идеальную анкету 💫\n"
+        "Шаг 1/9. Введи имя (2-40 символов).\n"
+        "Если передумаешь - /cancel"
+    )
 
 
 @router.message(ProfileWizard.display_name)

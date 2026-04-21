@@ -9,7 +9,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="Моя анкета"), KeyboardButton(text="Заполнить анкету")],
             [KeyboardButton(text="Редактировать анкету"), KeyboardButton(text="Добавить фото")],
-            [KeyboardButton(text="Лента анкет")],
+            [KeyboardButton(text="Лента анкет"), KeyboardButton(text="Отмена заполнения")],
         ],
         resize_keyboard=True,
     )

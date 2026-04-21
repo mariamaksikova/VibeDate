@@ -11,7 +11,31 @@ def normalize_database_url(raw_dsn: str) -> str:
 
 
 async def create_pool(dsn: str) -> asyncpg.Pool:
-    return await asyncpg.create_pool(normalize_database_url(dsn), min_size=1, max_size=10)
+    pool = await asyncpg.create_pool(normalize_database_url(dsn), min_size=1, max_size=10)
+    await ensure_runtime_schema(pool)
+    return pool
+
+
+async def ensure_runtime_schema(pool: asyncpg.Pool) -> None:
+    """Apply lightweight runtime migrations for local development."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            ALTER TABLE profiles
+            ADD COLUMN IF NOT EXISTS display_name VARCHAR(80)
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS photos (
+                id         SERIAL PRIMARY KEY,
+                profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                s3_key     TEXT NOT NULL,
+                is_main    BOOLEAN DEFAULT FALSE,
+                order_num  INTEGER DEFAULT 1
+            )
+            """
+        )
 
 
 async def ensure_user_and_profile(
@@ -63,6 +87,7 @@ async def get_profile_by_tg_id(pool: asyncpg.Pool, tg_id: int) -> dict[str, Any]
             SELECT
                 p.id,
                 p.user_id,
+                p.display_name,
                 p.age,
                 p.gender,
                 p.city,
@@ -73,7 +98,8 @@ async def get_profile_by_tg_id(pool: asyncpg.Pool, tg_id: int) -> dict[str, Any]
                 p.looking_for,
                 p.photo_count,
                 p.completeness_score,
-                p.primary_rating
+                p.primary_rating,
+                u.username
             FROM users u
             JOIN profiles p ON p.user_id = u.id
             WHERE u.tg_id = $1
@@ -90,6 +116,7 @@ async def update_profile_field(
     value: Any,
 ) -> dict[str, Any] | None:
     allowed_fields = {
+        "display_name",
         "age",
         "gender",
         "city",
@@ -137,6 +164,7 @@ async def get_next_candidate(pool: asyncpg.Pool, viewer_tg_id: int) -> dict[str,
                 p.id AS profile_id,
                 u.tg_id,
                 u.username,
+                p.display_name,
                 p.age,
                 p.gender,
                 p.city,
@@ -147,16 +175,31 @@ async def get_next_candidate(pool: asyncpg.Pool, viewer_tg_id: int) -> dict[str,
             JOIN users u ON u.id = p.user_id
             LEFT JOIN ratings r ON r.profile_id = p.id
             WHERE p.id <> $1
-              AND ($2::int IS NULL OR p.age IS NULL OR p.age >= $2)
-              AND ($3::int IS NULL OR p.age IS NULL OR p.age <= $3)
+              AND p.display_name IS NOT NULL
+              AND p.age IS NOT NULL
+              AND p.gender IS NOT NULL
+              AND p.city IS NOT NULL
+              AND p.interests IS NOT NULL
+              AND p.bio IS NOT NULL
+              AND p.looking_for IS NOT NULL
+              AND p.min_age IS NOT NULL
+              AND p.max_age IS NOT NULL
+              AND ($2::int IS NULL OR p.age >= $2)
+              AND ($3::int IS NULL OR p.age <= $3)
+              AND ($4::text IS NULL OR $4::text = '' OR $4::text = 'a' OR p.gender = $4::text)
+              AND (
+                  p.looking_for IS NULL
+                  OR p.looking_for = ''
+                  OR p.looking_for = 'a'
+                  OR ($5::text IS NOT NULL AND p.looking_for = $5::text)
+              )
               AND NOT EXISTS (
                   SELECT 1
                   FROM likes l
                   WHERE l.from_profile = $1 AND l.to_profile = p.id
               )
             ORDER BY
-                CASE WHEN $4::text IS NOT NULL AND p.gender = $4 THEN 1 ELSE 0 END DESC,
-                CASE WHEN $5::text IS NOT NULL AND p.city = $5 THEN 1 ELSE 0 END DESC,
+                CASE WHEN $6::text IS NOT NULL AND p.city = $6 THEN 1 ELSE 0 END DESC,
                 COALESCE(r.combined_rating, 1000) DESC,
                 p.updated_at DESC
             LIMIT 1
@@ -165,6 +208,7 @@ async def get_next_candidate(pool: asyncpg.Pool, viewer_tg_id: int) -> dict[str,
             viewer["min_age"],
             viewer["max_age"],
             viewer["looking_for"],
+            viewer["gender"],
             viewer["city"],
         )
         return dict(row) if row else None
@@ -194,6 +238,16 @@ async def react_to_candidate(
             if from_profile_id == to_profile_id:
                 raise RuntimeError("Self reaction is not allowed")
 
+            previous_reaction = await conn.fetchval(
+                """
+                SELECT is_like
+                FROM likes
+                WHERE from_profile = $1 AND to_profile = $2
+                """,
+                from_profile_id,
+                to_profile_id,
+            )
+
             await conn.execute(
                 """
                 INSERT INTO likes (from_profile, to_profile, is_like)
@@ -211,16 +265,42 @@ async def react_to_candidate(
                 to_profile_id,
             )
 
-            if is_like:
-                await conn.execute(
-                    "UPDATE ratings SET likes_received = likes_received + 1, updated_at = NOW() WHERE profile_id = $1",
-                    to_profile_id,
-                )
-            else:
-                await conn.execute(
-                    "UPDATE ratings SET skips_received = skips_received + 1, updated_at = NOW() WHERE profile_id = $1",
-                    to_profile_id,
-                )
+            if previous_reaction is None:
+                if is_like:
+                    await conn.execute(
+                        "UPDATE ratings SET likes_received = likes_received + 1, updated_at = NOW() WHERE profile_id = $1",
+                        to_profile_id,
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE ratings SET skips_received = skips_received + 1, updated_at = NOW() WHERE profile_id = $1",
+                        to_profile_id,
+                    )
+            elif previous_reaction != is_like:
+                if previous_reaction:
+                    await conn.execute(
+                        """
+                        UPDATE ratings
+                        SET
+                            likes_received = GREATEST(likes_received - 1, 0),
+                            skips_received = skips_received + 1,
+                            updated_at = NOW()
+                        WHERE profile_id = $1
+                        """,
+                        to_profile_id,
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE ratings
+                        SET
+                            skips_received = GREATEST(skips_received - 1, 0),
+                            likes_received = likes_received + 1,
+                            updated_at = NOW()
+                        WHERE profile_id = $1
+                        """,
+                        to_profile_id,
+                    )
 
             mutual_like = await conn.fetchval(
                 """
@@ -234,25 +314,107 @@ async def react_to_candidate(
             )
 
             is_match = False
+            match_contacts: dict[str, Any] | None = None
             if is_like and mutual_like:
                 p1, p2 = sorted([from_profile_id, to_profile_id])
-                await conn.execute(
+                inserted_match_id = await conn.fetchval(
                     """
                     INSERT INTO matches (profile1, profile2)
                     VALUES ($1, $2)
                     ON CONFLICT (profile1, profile2) DO NOTHING
+                    RETURNING id
                     """,
                     p1,
                     p2,
                 )
-                await conn.execute(
-                    "UPDATE ratings SET matches_count = matches_count + 1, updated_at = NOW() WHERE profile_id = ANY($1::int[])",
+                if inserted_match_id is not None:
+                    await conn.execute(
+                        "UPDATE ratings SET matches_count = matches_count + 1, dialogs_started = dialogs_started + 1, updated_at = NOW() WHERE profile_id = ANY($1::int[])",
+                        [from_profile_id, to_profile_id],
+                    )
+                is_match = True
+                contact_rows = await conn.fetch(
+                    """
+                    SELECT
+                        p.id AS profile_id,
+                        p.display_name,
+                        u.tg_id,
+                        u.username
+                    FROM profiles p
+                    JOIN users u ON u.id = p.user_id
+                    WHERE p.id = ANY($1::int[])
+                    """,
                     [from_profile_id, to_profile_id],
                 )
-                is_match = True
+                contacts_by_profile = {row["profile_id"]: dict(row) for row in contact_rows}
+                match_contacts = {
+                    "from_user": contacts_by_profile.get(from_profile_id),
+                    "to_user": contacts_by_profile.get(to_profile_id),
+                }
 
             return {
                 "from_profile_id": from_profile_id,
                 "to_profile_id": to_profile_id,
                 "is_match": is_match,
+                "match_contacts": match_contacts,
             }
+
+
+async def add_profile_photo_by_tg_id(pool: asyncpg.Pool, tg_id: int, file_id: str) -> dict[str, Any] | None:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            profile = await conn.fetchrow(
+                """
+                SELECT p.id
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id
+                WHERE u.tg_id = $1
+                """,
+                tg_id,
+            )
+            if profile is None:
+                return None
+            profile_id = int(profile["id"])
+            count = int(
+                await conn.fetchval("SELECT COUNT(*) FROM photos WHERE profile_id = $1", profile_id) or 0
+            )
+            if count >= 5:
+                return {"profile_id": profile_id, "photo_count": count, "saved": False}
+
+            await conn.execute(
+                """
+                INSERT INTO photos (profile_id, s3_key, is_main, order_num)
+                VALUES ($1, $2, $3, $4)
+                """,
+                profile_id,
+                f"tg:{file_id}",
+                count == 0,
+                count + 1,
+            )
+            new_count = count + 1
+            await conn.execute(
+                """
+                UPDATE profiles
+                SET photo_count = $2, updated_at = NOW()
+                WHERE id = $1
+                """,
+                profile_id,
+                new_count,
+            )
+            return {"profile_id": profile_id, "photo_count": new_count, "saved": True}
+
+
+async def get_profile_photos_by_tg_id(pool: asyncpg.Pool, tg_id: int) -> list[dict[str, Any]]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT ph.id, ph.s3_key, ph.is_main, ph.order_num
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            JOIN photos ph ON ph.profile_id = p.id
+            WHERE u.tg_id = $1
+            ORDER BY ph.order_num, ph.id
+            """,
+            tg_id,
+        )
+        return [dict(row) for row in rows]

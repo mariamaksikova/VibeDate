@@ -1,1 +1,0 @@
-"""VibeDate application package."""

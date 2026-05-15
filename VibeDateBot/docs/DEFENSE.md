@@ -8,7 +8,7 @@
 
 Где в коде:
 
-- `docker-compose.yml` — сервис `db` (порт хоста **55432**);
+- `docker-compose.yml` — сервис `db` (порт хоста **55433**);
 - `docs/vibedatebd.sql` — схема: `users`, `profiles`, `photos`, `likes`, `matches`, `ratings`;
 - `app/db.py` — пул `asyncpg`, регистрация, рефералы, лента, реакции, фото, индексы (`ensure_runtime_schema`);
 - `app/handlers/common.py` — `/start`, `/invite`;
@@ -57,7 +57,7 @@
 
 Где в коде:
 
-- `docker-compose.yml` — сервис `rabbitmq` (AMQP **5672**, UI **15672**);
+- `docker-compose.yml` — сервис `rabbitmq` (AMQP на хосте **5673**, UI **15673**);
 - `app/events_rabbitmq.py` — очередь `vibedate.profile_events`, метод `publish_profile_interaction`;
 - `app/handlers/dating.py` — публикация после лайка/скипа и при мэтче;
 - `app/event_consumer.py` — запуск: `python -m app.event_consumer`;
@@ -73,7 +73,7 @@
 
 Где в коде:
 
-- `docker-compose.yml` — сервисы `minio`, `minio-init` (API **9000**, консоль **9002** на хосте);
+- `docker-compose.yml` — сервисы `minio`, `minio-init` (API **9003**, консоль **9002** на хосте);
 - `app/services/storage.py` — загрузка, скачивание, создание bucket;
 - `app/config.py` — `MINIO_ENDPOINT`, ключи, имя bucket;
 - `app/handlers/dating.py` — `/add_photo`: файл из Telegram → MinIO; `/my_profile`: показ фото из MinIO;
@@ -129,13 +129,13 @@
 
 Где в коде:
 
-- `docker-compose.yml` — порт **9100** у сервиса `app`;
+- `docker-compose.yml` — метрики на хосте **9101** (внутри контейнера 9100);
 - `app/metrics.py` — счётчики `vibedate_feed_views_total`, `vibedate_reactions_total`;
 - `app/main.py` — `start_metrics_http_server_if_configured`;
 - `app/handlers/dating.py` — `inc_feed_view`, `inc_reaction`;
 - `.env.example` — `METRICS_PORT=9100`.
 
-Проверка: `http://localhost:9100/metrics`.
+Проверка: `http://localhost:9101/metrics`.
 
 ---
 
@@ -174,7 +174,7 @@
 
 Где в коде:
 
-- `docs/jmeter/metrics-load.jmx` — сценарий: 30 потоков, GET `http://localhost:9100/metrics`, 30 секунд;
+- `docs/jmeter/metrics-load.jmx` — сценарий: 30 потоков, GET `http://localhost:9101/metrics`, 30 секунд;
 - перед тестом поднять стек: `docker compose up -d`, в `.env` указать `METRICS_PORT=9100`.
 
 Запуск: JMeter → Open → `metrics-load.jmx` → Run → Summary Report.
@@ -212,7 +212,7 @@
 
 Запуск: `docker compose up --build`.
 
-Порты на хосте: Postgres **55432**, Redis **6379**, MinIO API **9000**, MinIO Console **9002**, RabbitMQ **5672** / UI **15672**, метрики **9100**.
+Порты на хосте: Postgres **55433**, Redis **6380**, MinIO API **9003**, MinIO Console **9002**, RabbitMQ **5673** / UI **15673**, метрики **9101**.
 
 ---
 

@@ -14,12 +14,12 @@ docker compose up --build
 
 | Сервис | Порт на хосте |
 |--------|----------------|
-| Postgres | 55432 |
-| Redis | 6379 |
-| MinIO API | 9000 |
+| Postgres | 55433 |
+| Redis | 6380 |
+| MinIO API | 9003 |
 | MinIO Console | **9002** |
-| RabbitMQ UI | 15672 |
-| Метрики Prometheus | 9100 |
+| RabbitMQ UI | 15673 |
+| Метрики Prometheus | 9101 |
 
 Если порт 9002 занят — останови другой MinIO или измени mapping в `docker-compose.yml`.
 

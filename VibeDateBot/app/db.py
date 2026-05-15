@@ -615,3 +615,78 @@ async def get_profile_photos_by_tg_id(pool: asyncpg.Pool, tg_id: int) -> list[di
             tg_id,
         )
         return [dict(row) for row in rows]
+
+
+async def get_admin_dashboard_stats(pool: asyncpg.Pool) -> dict[str, int | float | None]:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                (SELECT COUNT(*)::int FROM users) AS users_count,
+                (SELECT COUNT(*)::int FROM profiles) AS profiles_count,
+                (SELECT COUNT(*)::int FROM likes) AS likes_count,
+                (SELECT COUNT(*)::int FROM likes WHERE is_like = TRUE) AS likes_positive,
+                (SELECT COUNT(*)::int FROM matches) AS matches_count,
+                (SELECT COUNT(*)::int FROM photos) AS photos_count,
+                (SELECT COUNT(*)::int FROM users WHERE referred_by IS NOT NULL) AS referrals_count,
+                (SELECT ROUND(AVG(combined_rating)::numeric, 1) FROM ratings) AS avg_combined_rating
+            """
+        )
+    assert row is not None
+    return dict(row)
+
+
+async def get_top_profiles_by_rating(pool: asyncpg.Pool, *, limit: int = 5) -> list[dict[str, Any]]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                p.id AS profile_id,
+                COALESCE(p.display_name, u.username, 'без имени') AS title,
+                r.combined_rating,
+                r.primary_rating,
+                r.likes_received,
+                r.matches_count,
+                p.city
+            FROM ratings r
+            JOIN profiles p ON p.id = r.profile_id
+            JOIN users u ON u.id = p.user_id
+            ORDER BY r.combined_rating DESC, p.id
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(row) for row in rows]
+
+
+async def get_user_admin_snapshot(pool: asyncpg.Pool, tg_id: int) -> dict[str, Any] | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                u.id AS user_id,
+                u.tg_id,
+                u.username,
+                u.referral_code,
+                u.referred_by,
+                u.created_at AS user_created_at,
+                p.id AS profile_id,
+                p.display_name,
+                p.city,
+                p.completeness_score,
+                p.photo_count,
+                r.primary_rating,
+                r.combined_rating,
+                r.likes_received,
+                r.skips_received,
+                r.matches_count,
+                r.dialogs_started,
+                (SELECT COUNT(*)::int FROM users ref WHERE ref.referred_by = u.id) AS invited_count
+            FROM users u
+            LEFT JOIN profiles p ON p.user_id = u.id
+            LEFT JOIN ratings r ON r.profile_id = p.id
+            WHERE u.tg_id = $1
+            """,
+            tg_id,
+        )
+    return dict(row) if row else None

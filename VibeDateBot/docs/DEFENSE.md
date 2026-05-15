@@ -175,7 +175,6 @@
 Где в коде:
 
 - `docs/jmeter/metrics-load.jmx` — сценарий: 30 потоков, GET `http://localhost:9101/metrics`, 30 секунд;
-- перед тестом поднять стек: `docker compose up -d`, в `.env` указать `METRICS_PORT=9100`.
 
 Запуск: JMeter → Open → `metrics-load.jmx` → Run → Summary Report.
 
@@ -246,6 +245,23 @@
 
 ---
 
+## Админ-панель в Telegram
+
+Технология: ограниченные admin-команды в боте (aiogram).
+
+Зачем: отдельный «доп» — оператор видит сводку по системе без pgAdmin: пользователи, мэтчи, топ рейтинга, карточка по `tg_id`, ручной запуск пересчёта через Celery. Доступ только у ID из `ADMIN_TG_IDS`.
+
+Где в коде:
+
+- `app/admin_access.py` — разбор `ADMIN_TG_IDS`;
+- `app/handlers/admin.py` — `/admin`, `/admin_stats`, `/admin_top`, `/admin_user`, `/admin_recalc`;
+- `app/db.py` — `get_admin_dashboard_stats`, `get_top_profiles_by_rating`, `get_user_admin_snapshot`;
+- `.env.example` — `ADMIN_TG_IDS`.
+
+Проверка: в `.env` указать свой Telegram ID → перезапустить compose → `/admin_stats`.
+
+---
+
 ## Этапы продукта (кратко)
 
 Этап 1 — планирование: `docs/vibedatebd.sql`, схема в `docs/`, архитектура в compose.
@@ -254,7 +270,7 @@
 
 Этап 3 — анкеты и ранжирование: CRUD, 3 уровня рейтинга, Redis-кэш ленты, интеграция с ботом.
 
-Этап 4 — дополнительно: Celery, оптимизация БД (индексы), pytest, метрики и логи, MinIO, RabbitMQ, CI, JMeter.
+Этап 4 — дополнительно: Celery, оптимизация БД (индексы), pytest, метрики и логи, MinIO, RabbitMQ, CI, JMeter, админ-панель в боте.
 
 ---
 
@@ -265,3 +281,4 @@
 3. Взаимный лайк — `matches`, уведомления через Celery (`notify_match`).
 4. Фото — Telegram → MinIO → `photos.s3_key` в PostgreSQL.
 5. Раз в 10 минут Celery пересчитывает все рейтинги.
+

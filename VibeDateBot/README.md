@@ -23,6 +23,16 @@ docker compose up --build
 
 Если порт 9002 занят — останови другой MinIO или измени mapping в `docker-compose.yml`.
 
+## Админка
+
+В `.env` добавь свой Telegram ID (через [@userinfobot](https://t.me/userinfobot)):
+
+```env
+ADMIN_TG_IDS=ваш_id
+```
+
+Команды в боте: `/admin`, `/admin_stats`, `/admin_top`, `/admin_user <tg_id>`, `/admin_recalc`.
+
 ## Тесты
 
 ```bash

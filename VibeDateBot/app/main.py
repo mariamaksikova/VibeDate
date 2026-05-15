@@ -8,10 +8,11 @@ import structlog
 from aiogram import Bot, Dispatcher
 from redis.asyncio import Redis
 
+from app.admin_access import load_admin_tg_ids
 from app.config import load_settings
 from app.db import create_pool
 from app.events_rabbitmq import shutdown_publisher
-from app.handlers import common_router, dating_router
+from app.handlers import admin_router, common_router, dating_router
 from app.metrics import start_metrics_http_server_if_configured
 from app.middleware import RateLimitMiddleware
 from app.services.storage import ensure_bucket
@@ -56,8 +57,15 @@ async def run() -> None:
     dp = Dispatcher()
     if redis is not None:
         dp.update.middleware(RateLimitMiddleware())
+    dp.include_router(admin_router)
     dp.include_router(common_router)
     dp.include_router(dating_router)
+
+    admin_ids = load_admin_tg_ids()
+    if admin_ids:
+        logger.info("admin_configured", admins=len(admin_ids))
+    else:
+        logger.warning("admin_not_configured", reason="ADMIN_TG_IDS is empty")
 
     logger.info("bot_started")
     try:

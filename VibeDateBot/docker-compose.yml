@@ -34,15 +34,49 @@ services:
     volumes:
       - minio_data:/data
 
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: vibedate-rabbitmq
+    restart: always
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  celery-worker:
+    build: .
+    container_name: vibedate-celery-worker
+    restart: always
+    env_file: .env
+    command: celery -A app.celery_app:celery_app worker -l INFO
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - .:/workspace
+
+  celery-beat:
+    build: .
+    container_name: vibedate-celery-beat
+    restart: always
+    env_file: .env
+    command: celery -A app.celery_app:celery_app beat -l INFO
+    depends_on:
+      - redis
+    volumes:
+      - .:/workspace
+
   app:
     build: .
     container_name: vibedate-app
     restart: always
     env_file: .env
+    ports:
+      - "9100:9100"
     depends_on:
       - db
       - redis
       - minio
+      - rabbitmq
     volumes:
       - .:/workspace
     command: python -m app.main

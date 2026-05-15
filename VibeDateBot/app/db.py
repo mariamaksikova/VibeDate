@@ -36,6 +36,12 @@ async def ensure_runtime_schema(pool: asyncpg.Pool) -> None:
             )
             """
         )
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_likes_from_profile ON likes(from_profile)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_likes_to_profile ON likes(to_profile)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_profiles_updated_at ON profiles(updated_at DESC)")
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_profile ON photos(profile_id)"
+        )
 
 
 async def ensure_user_and_profile(
@@ -210,6 +216,127 @@ async def get_next_candidate(pool: asyncpg.Pool, viewer_tg_id: int) -> dict[str,
             viewer["looking_for"],
             viewer["gender"],
             viewer["city"],
+        )
+        return dict(row) if row else None
+
+
+_FEED_CANDIDATE_SQL = """
+            FROM profiles p
+            JOIN users u ON u.id = p.user_id
+            LEFT JOIN ratings r ON r.profile_id = p.id
+            WHERE p.id <> $1
+              AND p.display_name IS NOT NULL
+              AND p.age IS NOT NULL
+              AND p.gender IS NOT NULL
+              AND p.city IS NOT NULL
+              AND p.interests IS NOT NULL
+              AND p.bio IS NOT NULL
+              AND p.looking_for IS NOT NULL
+              AND p.min_age IS NOT NULL
+              AND p.max_age IS NOT NULL
+              AND ($2::int IS NULL OR p.age >= $2)
+              AND ($3::int IS NULL OR p.age <= $3)
+              AND ($4::text IS NULL OR $4::text = '' OR $4::text = 'a' OR p.gender = $4::text)
+              AND (
+                  p.looking_for IS NULL
+                  OR p.looking_for = ''
+                  OR p.looking_for = 'a'
+                  OR ($5::text IS NOT NULL AND p.looking_for = $5::text)
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM likes l
+                  WHERE l.from_profile = $1 AND l.to_profile = p.id
+              )
+"""
+
+
+async def get_next_candidate_ids(
+    pool: asyncpg.Pool,
+    viewer_tg_id: int,
+    limit: int,
+    *,
+    exclude_profile_ids: list[int] | None = None,
+) -> list[int]:
+    """Return ranked profile ids for feed prefetch (Redis batch)."""
+    exclude_profile_ids = exclude_profile_ids or []
+    async with pool.acquire() as conn:
+        viewer = await conn.fetchrow(
+            """
+            SELECT p.id, p.gender, p.city, p.min_age, p.max_age, p.looking_for
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            WHERE u.tg_id = $1
+            """,
+            viewer_tg_id,
+        )
+        if viewer is None:
+            return []
+
+        rows = await conn.fetch(
+            f"""
+            SELECT p.id
+            {_FEED_CANDIDATE_SQL}
+              AND (cardinality($6::int[]) = 0 OR NOT (p.id = ANY($6::int[])))
+            ORDER BY
+                CASE WHEN $7::text IS NOT NULL AND p.city = $7 THEN 1 ELSE 0 END DESC,
+                COALESCE(r.combined_rating, 1000) DESC,
+                p.updated_at DESC
+            LIMIT $8
+            """,
+            viewer["id"],
+            viewer["min_age"],
+            viewer["max_age"],
+            viewer["looking_for"],
+            viewer["gender"],
+            exclude_profile_ids,
+            viewer["city"],
+            limit,
+        )
+        return [int(r["id"]) for r in rows]
+
+
+async def get_candidate_for_viewer(
+    pool: asyncpg.Pool,
+    viewer_tg_id: int,
+    candidate_profile_id: int,
+) -> dict[str, Any] | None:
+    """Load one feed card if it still matches viewer rules (after Redis prefetch)."""
+    async with pool.acquire() as conn:
+        viewer = await conn.fetchrow(
+            """
+            SELECT p.id, p.gender, p.city, p.min_age, p.max_age, p.looking_for
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            WHERE u.tg_id = $1
+            """,
+            viewer_tg_id,
+        )
+        if viewer is None:
+            return None
+
+        row = await conn.fetchrow(
+            f"""
+            SELECT
+                p.id AS profile_id,
+                u.tg_id,
+                u.username,
+                p.display_name,
+                p.age,
+                p.gender,
+                p.city,
+                p.interests,
+                p.bio,
+                COALESCE(r.combined_rating, 1000) AS combined_rating
+            {_FEED_CANDIDATE_SQL}
+              AND p.id = $6
+            """,
+            viewer["id"],
+            viewer["min_age"],
+            viewer["max_age"],
+            viewer["looking_for"],
+            viewer["gender"],
+            candidate_profile_id,
         )
         return dict(row) if row else None
 

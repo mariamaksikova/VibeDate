@@ -34,6 +34,8 @@ CREATE TABLE photos (
     order_num  INTEGER DEFAULT 1
 );
 
+CREATE INDEX IF NOT EXISTS idx_photos_profile ON photos(profile_id);
+
 CREATE TABLE likes (
     id              SERIAL PRIMARY KEY,
     from_profile    INTEGER NOT NULL REFERENCES profiles(id),
@@ -50,6 +52,11 @@ CREATE TABLE matches (
     created_at  TIMESTAMP DEFAULT NOW(),
     UNIQUE (profile1, profile2)
 );
+
+CREATE INDEX IF NOT EXISTS idx_likes_from_profile ON likes(from_profile);
+CREATE INDEX IF NOT EXISTS idx_likes_to_profile ON likes(to_profile);
+CREATE INDEX IF NOT EXISTS idx_profiles_updated_at ON profiles(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_profiles_city ON profiles(city) WHERE city IS NOT NULL;
 
 CREATE TABLE ratings (
     profile_id          INTEGER PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,

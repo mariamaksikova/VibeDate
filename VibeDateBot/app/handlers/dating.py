@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import html
-import logging
 
 import asyncpg
+import structlog
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -19,11 +20,15 @@ from app.db import (
     react_to_candidate,
     update_profile_field,
 )
+from app.events_rabbitmq import publish_profile_interaction
 from app.keyboards.main import candidate_actions_keyboard, edit_profile_keyboard
+from app.metrics import inc_feed_view, inc_reaction
+from app.services.feed_cache import pop_next_feed_candidate
 from app.services.profile import refresh_profile_rating
+from redis.asyncio import Redis
 
 router = Router()
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 MIN_USER_AGE = 18
 MAX_USER_AGE = 100
@@ -171,6 +176,7 @@ async def _show_feed(
     db_pool: asyncpg.Pool,
     viewer_tg_id: int | None = None,
     viewer_username: str | None = None,
+    redis: Redis | None = None,
 ) -> None:
     if viewer_tg_id is None and message.from_user is None:
         return
@@ -185,10 +191,15 @@ async def _show_feed(
             "Перед лентой нужно оформить профиль полностью. Жми 'Заполнить анкету' - это займет пару минут."
         )
         return
-    candidate = await get_next_candidate(db_pool, user_tg_id)
+    if redis is not None:
+        candidate = await pop_next_feed_candidate(redis, db_pool, user_tg_id)
+    else:
+        candidate = await get_next_candidate(db_pool, user_tg_id)
     if candidate is None:
         await message.answer("Похоже, анкеты закончились. Загляни чуть позже - лента обновится.")
         return
+    inc_feed_view()
+    logger.info("feed_shown", viewer_tg_id=user_tg_id, candidate_profile_id=candidate.get("profile_id"))
     await message.answer(
         "Новая анкета:\n"
         f"Имя: {candidate.get('display_name') or 'не указано'}\n"
@@ -218,8 +229,23 @@ async def _react_and_reply(
         )
         await refresh_profile_rating(db_pool, result["to_profile_id"])
         await refresh_profile_rating(db_pool, result["from_profile_id"])
+        inc_reaction(is_like=is_like)
+        await asyncio.to_thread(
+            publish_profile_interaction,
+            event="reaction",
+            actor_tg_id=user_tg_id,
+            target_profile_id=profile_id,
+            is_like=is_like,
+        )
+        logger.info(
+            "reaction_saved",
+            actor_tg_id=user_tg_id,
+            target_profile_id=profile_id,
+            is_like=is_like,
+            is_match=result.get("is_match"),
+        )
     except Exception:
-        logger.exception("Reaction failed from tg_id=%s", user_tg_id)
+        logger.error("reaction_failed", tg_id=user_tg_id, exc_info=True)
         return False, "Не удалось сохранить реакцию."
     if result["is_match"]:
         contacts = result.get("match_contacts") or {}
@@ -238,7 +264,7 @@ async def _react_and_reply(
                 await bot.send_message(int(from_user["tg_id"]), from_text, parse_mode="HTML")
                 await bot.send_message(int(to_user["tg_id"]), to_text, parse_mode="HTML")
             except Exception:
-                logger.exception("Failed to deliver match contacts")
+                logger.error("match_notify_failed", exc_info=True)
                 return True, "Взаимный лайк! Контакты готовы, но не удалось отправить уведомление."
         return True, "Взаимный лайк! Контакты отправлены вам обоим."
     return True, "Принято! Смотрим следующую анкету."
@@ -588,11 +614,11 @@ async def cmd_set_range(message: Message, db_pool: asyncpg.Pool) -> None:
 
 
 @router.message(Command("feed"))
-async def cmd_feed(message: Message, db_pool: asyncpg.Pool) -> None:
-    await _show_feed(message, db_pool)
+async def cmd_feed(message: Message, db_pool: asyncpg.Pool, redis: Redis | None = None) -> None:
+    await _show_feed(message, db_pool, redis=redis)
 
 
-async def _react(message: Message, db_pool: asyncpg.Pool, is_like: bool, bot: Bot) -> None:
+async def _react(message: Message, db_pool: asyncpg.Pool, is_like: bool, bot: Bot, redis: Redis | None = None) -> None:
     if message.from_user is None:
         return
     profile = await _ensure_profile_exists(db_pool, message.from_user.id, message.from_user.username)
@@ -610,21 +636,21 @@ async def _react(message: Message, db_pool: asyncpg.Pool, is_like: bool, bot: Bo
     ok, text = await _react_and_reply(message.from_user.id, profile_id, is_like, db_pool, bot)
     await message.answer(text)
     if ok:
-        await _show_feed(message, db_pool)
+        await _show_feed(message, db_pool, redis=redis)
 
 
 @router.message(Command("like"))
-async def cmd_like(message: Message, db_pool: asyncpg.Pool, bot: Bot) -> None:
-    await _react(message, db_pool, is_like=True, bot=bot)
+async def cmd_like(message: Message, db_pool: asyncpg.Pool, bot: Bot, redis: Redis | None = None) -> None:
+    await _react(message, db_pool, is_like=True, bot=bot, redis=redis)
 
 
 @router.message(Command("skip"))
-async def cmd_skip(message: Message, db_pool: asyncpg.Pool, bot: Bot) -> None:
-    await _react(message, db_pool, is_like=False, bot=bot)
+async def cmd_skip(message: Message, db_pool: asyncpg.Pool, bot: Bot, redis: Redis | None = None) -> None:
+    await _react(message, db_pool, is_like=False, bot=bot, redis=redis)
 
 
 @router.callback_query(lambda c: c.data is not None and (c.data.startswith("like:") or c.data.startswith("skip:")))
-async def cb_reaction(callback: CallbackQuery, db_pool: asyncpg.Pool, bot: Bot) -> None:
+async def cb_reaction(callback: CallbackQuery, db_pool: asyncpg.Pool, bot: Bot, redis: Redis | None = None) -> None:
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     parts = callback.data.split(":", maxsplit=1)
@@ -653,6 +679,7 @@ async def cb_reaction(callback: CallbackQuery, db_pool: asyncpg.Pool, bot: Bot) 
             db_pool,
             viewer_tg_id=callback.from_user.id,
             viewer_username=callback.from_user.username,
+            redis=redis,
         )
 
 
@@ -813,5 +840,5 @@ async def btn_my_profile(message: Message, db_pool: asyncpg.Pool) -> None:
 
 
 @router.message(lambda m: (m.text or "").strip() == "Лента анкет")
-async def btn_feed(message: Message, db_pool: asyncpg.Pool) -> None:
-    await _show_feed(message, db_pool)
+async def btn_feed(message: Message, db_pool: asyncpg.Pool, redis: Redis | None = None) -> None:
+    await _show_feed(message, db_pool, redis=redis)

@@ -13,6 +13,8 @@ from app.db import create_pool
 from app.events_rabbitmq import shutdown_publisher
 from app.handlers import common_router, dating_router
 from app.metrics import start_metrics_http_server_if_configured
+from app.middleware import RateLimitMiddleware
+from app.services.storage import ensure_bucket
 
 structlog.configure(
     processors=[
@@ -43,9 +45,17 @@ async def run() -> None:
 
     start_metrics_http_server_if_configured()
 
+    try:
+        await asyncio.to_thread(ensure_bucket)
+        logger.info("minio_bucket_ready")
+    except Exception as exc:
+        logger.warning("minio_unavailable", error=str(exc))
+
     bot = Bot(token=settings.bot_token)
 
     dp = Dispatcher()
+    if redis is not None:
+        dp.update.middleware(RateLimitMiddleware())
     dp.include_router(common_router)
     dp.include_router(dating_router)
 

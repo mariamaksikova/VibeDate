@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from typing import Any
 
 import asyncpg
@@ -44,23 +45,31 @@ async def ensure_runtime_schema(pool: asyncpg.Pool) -> None:
         )
 
 
+def _new_referral_code() -> str:
+    return secrets.token_urlsafe(6).replace("-", "")[:10]
+
+
 async def ensure_user_and_profile(
     pool: asyncpg.Pool,
     tg_id: int,
     username: str | None,
+    *,
+    referral_code_from_start: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     async with pool.acquire() as conn:
         async with conn.transaction():
             user = await conn.fetchrow(
                 """
-                INSERT INTO users (tg_id, username)
-                VALUES ($1, $2)
+                INSERT INTO users (tg_id, username, referral_code)
+                VALUES ($1, $2, $3)
                 ON CONFLICT (tg_id) DO UPDATE SET
-                    username = COALESCE(EXCLUDED.username, users.username)
-                RETURNING id
+                    username = COALESCE(EXCLUDED.username, users.username),
+                    referral_code = COALESCE(users.referral_code, EXCLUDED.referral_code)
+                RETURNING id, referral_code
                 """,
                 tg_id,
                 username,
+                _new_referral_code(),
             )
             assert user is not None
             user_id: int = user["id"]
@@ -70,7 +79,29 @@ async def ensure_user_and_profile(
                 user_id,
             )
             if profile is not None:
-                return False, {"user_id": user_id, "profile_id": profile["id"]}
+                return False, {
+                    "user_id": user_id,
+                    "profile_id": profile["id"],
+                    "referral_code": user["referral_code"],
+                }
+
+            referrer_id: int | None = None
+            if referral_code_from_start:
+                referrer_id = await conn.fetchval(
+                    "SELECT id FROM users WHERE referral_code = $1 AND id <> $2",
+                    referral_code_from_start,
+                    user_id,
+                )
+
+            await conn.execute(
+                """
+                UPDATE users
+                SET referred_by = COALESCE(referred_by, $2)
+                WHERE id = $1 AND referred_by IS NULL
+                """,
+                user_id,
+                referrer_id,
+            )
 
             profile = await conn.fetchrow(
                 "INSERT INTO profiles (user_id) VALUES ($1) RETURNING id",
@@ -83,7 +114,41 @@ async def ensure_user_and_profile(
                 "INSERT INTO ratings (profile_id) VALUES ($1) ON CONFLICT (profile_id) DO NOTHING",
                 profile_id,
             )
-            return True, {"user_id": user_id, "profile_id": profile_id}
+            return True, {
+                "user_id": user_id,
+                "profile_id": profile_id,
+                "referral_code": user["referral_code"],
+            }
+
+
+async def count_referrals_for_user(pool: asyncpg.Pool, user_id: int) -> int:
+    async with pool.acquire() as conn:
+        value = await conn.fetchval(
+            "SELECT COUNT(*)::int FROM users WHERE referred_by = $1",
+            user_id,
+        )
+        return int(value or 0)
+
+
+async def get_activity_peak_share(pool: asyncpg.Pool, profile_id: int) -> float:
+    """Доля лайков в самый активный час суток (уровень 2 — время активности)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT EXTRACT(HOUR FROM created_at)::int AS hour, COUNT(*)::int AS cnt
+            FROM likes
+            WHERE to_profile = $1 AND is_like = TRUE
+            GROUP BY hour
+            """,
+            profile_id,
+        )
+        if not rows:
+            return 0.0
+        counts = [int(r["cnt"]) for r in rows]
+        total = sum(counts)
+        if total == 0:
+            return 0.0
+        return max(counts) / total
 
 
 async def get_profile_by_tg_id(pool: asyncpg.Pool, tg_id: int) -> dict[str, Any] | None:
@@ -105,7 +170,8 @@ async def get_profile_by_tg_id(pool: asyncpg.Pool, tg_id: int) -> dict[str, Any]
                 p.photo_count,
                 p.completeness_score,
                 p.primary_rating,
-                u.username
+                u.username,
+                u.referral_code
             FROM users u
             JOIN profiles p ON p.user_id = u.id
             WHERE u.tg_id = $1
@@ -487,7 +553,11 @@ async def react_to_candidate(
             }
 
 
-async def add_profile_photo_by_tg_id(pool: asyncpg.Pool, tg_id: int, file_id: str) -> dict[str, Any] | None:
+async def add_profile_photo_by_tg_id(
+    pool: asyncpg.Pool,
+    tg_id: int,
+    s3_key: str,
+) -> dict[str, Any] | None:
     async with pool.acquire() as conn:
         async with conn.transaction():
             profile = await conn.fetchrow(
@@ -514,7 +584,7 @@ async def add_profile_photo_by_tg_id(pool: asyncpg.Pool, tg_id: int, file_id: st
                 VALUES ($1, $2, $3, $4)
                 """,
                 profile_id,
-                f"tg:{file_id}",
+                s3_key,
                 count == 0,
                 count + 1,
             )

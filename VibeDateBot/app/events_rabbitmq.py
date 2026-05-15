@@ -38,6 +38,8 @@ def publish_profile_interaction(
     actor_tg_id: int,
     target_profile_id: int,
     is_like: bool | None = None,
+    to_tg_id: int | None = None,
+    text: str | None = None,
 ) -> None:
     """Fire-and-forget JSON event to RabbitMQ (stream processing demo)."""
     with _lock:
@@ -45,12 +47,16 @@ def publish_profile_interaction(
         if conn_ch is None:
             return
         _connection, channel = conn_ch
-        body = {
+        body: dict[str, Any] = {
             "event": event,
             "actor_tg_id": actor_tg_id,
             "target_profile_id": target_profile_id,
             "is_like": is_like,
         }
+        if to_tg_id is not None:
+            body["to_tg_id"] = to_tg_id
+        if text is not None:
+            body["text"] = text
         try:
             import pika
 

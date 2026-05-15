@@ -1,7 +1,6 @@
 """
-Optional RabbitMQ consumer for vibedate.profile_events (демонстрация потоковой обработки).
+Consumer RabbitMQ: реакции и мэтчи → Celery-задачи.
 
-Запуск локально:
   export RABBITMQ_URL=amqp://guest:guest@localhost:5672/
   python -m app.event_consumer
 """
@@ -23,24 +22,33 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     url = os.getenv("RABBITMQ_URL", "").strip()
     if not url:
-        logger.error("Set RABBITMQ_URL (e.g. amqp://guest:guest@localhost:5672/)")
+        logger.error("Set RABBITMQ_URL")
         sys.exit(1)
+
     import pika
 
     connection = pika.BlockingConnection(pika.URLParameters(url))
     channel = connection.channel()
     channel.queue_declare(queue="vibedate.profile_events", durable=False)
 
-    def callback(_ch: object, method: object, _properties: object, body: bytes) -> None:
+    def callback(_ch: object, _method: object, _properties: object, body: bytes) -> None:
         try:
             payload = json.loads(body.decode("utf-8"))
         except json.JSONDecodeError:
             logger.warning("Bad JSON: %s", body[:200])
-        else:
-            logger.info("profile_event %s", payload)
+            return
+
+        event = payload.get("event")
+        logger.info("profile_event %s", payload)
+
+        if event == "match":
+            logger.info(
+                "match_event to_tg_id=%s (уведомление отправляет Celery из бота)",
+                payload.get("to_tg_id"),
+            )
 
     channel.basic_consume(queue="vibedate.profile_events", on_message_callback=callback, auto_ack=True)
-    logger.info("Consuming vibedate.profile_events; Ctrl+C to stop")
+    logger.info("Consuming vibedate.profile_events")
     channel.start_consuming()
 
 

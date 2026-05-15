@@ -1,0 +1,29 @@
+name: VibeDate CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "VibeDateBot/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "VibeDateBot/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: VibeDateBot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Unit tests (rating formulas)
+        run: PYTHONPATH=. pytest tests/test_rating.py -q
+      - name: Validate docker compose
+        run: docker compose config -q

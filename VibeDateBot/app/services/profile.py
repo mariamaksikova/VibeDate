@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import asyncpg
 
-from app.services.rating import calc_behavior_rating, calc_combined_rating, calc_primary_rating
+from app.db import count_referrals_for_user, get_activity_peak_share
+from app.services.rating import (
+    calc_behavior_rating,
+    calc_combined_rating,
+    calc_primary_rating,
+    calc_referral_bonus,
+)
 
 
 def _profile_completeness(
@@ -29,7 +35,10 @@ async def refresh_profile_rating(pool: asyncpg.Pool, profile_id: int) -> None:
                 p.bio,
                 p.display_name,
                 p.looking_for,
+                p.min_age,
+                p.max_age,
                 p.photo_count,
+                p.user_id,
                 COALESCE(r.likes_received, 0) AS likes_received,
                 COALESCE(r.skips_received, 0) AS skips_received,
                 COALESCE(r.matches_count, 0) AS matches_count,
@@ -53,19 +62,26 @@ async def refresh_profile_rating(pool: asyncpg.Pool, profile_id: int) -> None:
         )
         primary = calc_primary_rating(
             age=row["age"],
-            interests=row["interests"],
+            gender=row["gender"],
             city=row["city"],
+            interests=row["interests"],
             looking_for=row["looking_for"],
+            min_age=row["min_age"],
+            max_age=row["max_age"],
             photo_count=row["photo_count"] or 0,
             profile_completeness=completeness,
         )
+        activity_peak = await get_activity_peak_share(pool, profile_id)
         behavior = calc_behavior_rating(
             likes_received=row["likes_received"],
             skips_received=row["skips_received"],
             matches_count=row["matches_count"],
             dialogs_started=row["dialogs_started"],
+            activity_peak_share=activity_peak,
         )
-        combined = calc_combined_rating(primary, behavior)
+        referrals = await count_referrals_for_user(pool, int(row["user_id"]))
+        referral_bonus = calc_referral_bonus(referrals)
+        combined = calc_combined_rating(primary, behavior, referral_bonus)
 
         await conn.execute(
             """

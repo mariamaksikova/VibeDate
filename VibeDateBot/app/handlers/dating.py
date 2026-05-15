@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import io
 
 import asyncpg
 import structlog
@@ -9,7 +10,7 @@ from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import Command, StateFilter
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from app.db import (
     add_profile_photo_by_tg_id,
@@ -25,6 +26,8 @@ from app.keyboards.main import candidate_actions_keyboard, edit_profile_keyboard
 from app.metrics import inc_feed_view, inc_reaction
 from app.services.feed_cache import pop_next_feed_candidate
 from app.services.profile import refresh_profile_rating
+from app.services import storage
+from app.tasks import notify_match
 from redis.asyncio import Redis
 
 router = Router()
@@ -129,6 +132,21 @@ def _telegram_file_id_from_photo_key(s3_key: object) -> str | None:
     if text.startswith("tg:") and len(text) > 3:
         return text[3:]
     return None
+
+
+async def _answer_profile_photo(message: Message, photo: dict[str, object], idx: int) -> None:
+    caption = f"Фото {idx}{' (главное)' if photo.get('is_main') else ''}"
+    file_id = _telegram_file_id_from_photo_key(photo.get("s3_key"))
+    if file_id is not None:
+        await message.answer_photo(file_id, caption=caption)
+        return
+    s3_key = str(photo.get("s3_key") or "")
+    if not s3_key or s3_key.startswith("tg:"):
+        return
+    data = await asyncio.to_thread(storage.download_profile_photo, s3_key)
+    if not data:
+        return
+    await message.answer_photo(BufferedInputFile(data, filename="photo.jpg"), caption=caption)
 
 
 def _profile_ready(profile: dict[str, object]) -> bool:
@@ -260,18 +278,25 @@ async def _react_and_reply(
                 "Взаимный лайк! У вас мэтч.\n"
                 f"Контакт собеседника: {_match_contact_line(from_user)}"
             )
-            try:
-                await bot.send_message(int(from_user["tg_id"]), from_text, parse_mode="HTML")
-                await bot.send_message(int(to_user["tg_id"]), to_text, parse_mode="HTML")
-            except Exception:
-                logger.error("match_notify_failed", exc_info=True)
-                return True, "Взаимный лайк! Контакты готовы, но не удалось отправить уведомление."
+            for tg_id, text in (
+                (int(from_user["tg_id"]), from_text),
+                (int(to_user["tg_id"]), to_text),
+            ):
+                await asyncio.to_thread(
+                    publish_profile_interaction,
+                    event="match",
+                    actor_tg_id=user_tg_id,
+                    target_profile_id=profile_id,
+                    to_tg_id=tg_id,
+                    text=text,
+                )
+                notify_match.delay(tg_id, text)
         return True, "Взаимный лайк! Контакты отправлены вам обоим."
     return True, "Принято! Смотрим следующую анкету."
 
 
 @router.message(Command("my_profile"))
-async def cmd_my_profile(message: Message, db_pool: asyncpg.Pool) -> None:
+async def cmd_my_profile(message: Message, db_pool: asyncpg.Pool, bot: Bot) -> None:
     if message.from_user is None:
         return
     profile = await _ensure_profile_exists(db_pool, message.from_user.id, message.from_user.username)
@@ -283,13 +308,7 @@ async def cmd_my_profile(message: Message, db_pool: asyncpg.Pool) -> None:
     if photos:
         await message.answer(f"Фотографии в анкете: {len(photos)}")
         for idx, photo in enumerate(photos[:3], start=1):
-            file_id = _telegram_file_id_from_photo_key(photo.get("s3_key"))
-            if file_id is None:
-                continue
-            await message.answer_photo(
-                file_id,
-                caption=f"Фото {idx}{' (главное)' if photo.get('is_main') else ''}",
-            )
+            await _answer_profile_photo(message, photo, idx)
         if len(photos) > 3:
             await message.answer("Показала первые 3 фото. Остальные тоже сохранены.")
     else:
@@ -449,11 +468,29 @@ async def cmd_my_photos(message: Message, db_pool: asyncpg.Pool) -> None:
 
 
 @router.message(PhotoUpload.waiting, lambda m: bool(m.photo))
-async def upload_photo(message: Message, state: FSMContext, db_pool: asyncpg.Pool) -> None:
+async def upload_photo(message: Message, state: FSMContext, db_pool: asyncpg.Pool, bot: Bot) -> None:
     if message.from_user is None or not message.photo:
         return
     file_id = message.photo[-1].file_id
-    result = await add_profile_photo_by_tg_id(db_pool, message.from_user.id, file_id)
+    profile = await get_profile_by_tg_id(db_pool, message.from_user.id)
+    if profile is None:
+        await state.clear()
+        await message.answer("Сначала создай профиль командой /start.")
+        return
+    s3_key = f"tg:{file_id}"
+    try:
+        tg_file = await bot.get_file(file_id)
+        buffer = io.BytesIO()
+        await bot.download(tg_file, buffer)
+        s3_key = await asyncio.to_thread(
+            storage.upload_profile_photo,
+            int(profile["id"]),
+            buffer.getvalue(),
+        )
+        logger.info("photo_uploaded_minio", profile_id=profile["id"], s3_key=s3_key)
+    except Exception:
+        logger.warning("minio_upload_fallback", tg_id=message.from_user.id, exc_info=True)
+    result = await add_profile_photo_by_tg_id(db_pool, message.from_user.id, s3_key)
     if result is None:
         await state.clear()
         await message.answer("Сначала создай профиль командой /start.")
@@ -835,8 +872,8 @@ async def wizard_max_age(message: Message, state: FSMContext, db_pool: asyncpg.P
 
 
 @router.message(lambda m: (m.text or "").strip() == "Моя анкета")
-async def btn_my_profile(message: Message, db_pool: asyncpg.Pool) -> None:
-    await cmd_my_profile(message, db_pool)
+async def btn_my_profile(message: Message, db_pool: asyncpg.Pool, bot: Bot) -> None:
+    await cmd_my_profile(message, db_pool, bot)
 
 
 @router.message(lambda m: (m.text or "").strip() == "Лента анкет")
